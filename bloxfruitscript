@@ -114,7 +114,7 @@ local function hookRemotes()
     setreadonly(mt, true)
 end
 
-pcall(hookRemotes)   -- silently fails on executors without metatable access
+-- pcall(hookRemotes)  -- Delta não suporta getrawmetatable, desativado
 
 -- ============================================================
 --  GUI BUILDER
@@ -128,7 +128,7 @@ local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name           = "BloxHub"
 ScreenGui.ResetOnSpawn   = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent         = CoreGui
+ScreenGui.Parent         = prl.PlayerGui
 
 -- ── Colour palette ──────────────────────────────────────────
 local C = {
