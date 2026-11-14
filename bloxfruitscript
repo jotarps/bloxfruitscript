@@ -1,0 +1,1217 @@
+--[[
+    ██████╗ ██╗      ██████╗ ██╗  ██╗    ██╗  ██╗██╗   ██╗██████╗ 
+    ██╔══██╗██║     ██╔═══██╗╚██╗██╔╝    ██║  ██║██║   ██║██╔══██╗
+    ██████╔╝██║     ██║   ██║ ╚███╔╝     ███████║██║   ██║██████╔╝
+    ██╔══██╗██║     ██║   ██║ ██╔██╗     ██╔══██║██║   ██║██╔══██╗
+    ██████╔╝███████╗╚██████╔╝██╔╝ ██╗    ██║  ██║╚██████╔╝██████╔╝
+    ╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚═════╝
+    
+    BloxHub v3.1 | Blox Fruits Auto Farm Suite
+    Language   : Luau (Roblox executor)
+    Runtime    : Roblox client (LocalScript context, executor injected)
+    Author     : built on the bench
+    
+    Features:
+      • Animated purple/black GUI with open/close/minimize
+      • Remote Spy (logs all RemoteEvent/RemoteFunction calls live)
+      • Auto Farm (level, mastery, quest auto-pick)
+      • Auto Bones (gravestone + undead enemy loop)
+      • Auto Halloween Event (Cursed Chest + Candy Corn + boss farm)
+      • Auto Raid
+      • Auto Boss Farm
+      • Fruit ESP / Notifier
+      • Auto Stats (allocate stat points)
+      • Kill Aura
+      • Fast Attack
+      • Fly / Teleport
+      • Anti-AFK
+    
+    Usage:
+      Inject via your executor while in Blox Fruits.
+      INSERT = toggle GUI visibility.
+      All toggles are runtime _G flags — safe to swap mid-session.
+]]
+
+-- ============================================================
+--  SERVICES & CORE REFS
+-- ============================================================
+local Players        = game:GetService("Players")
+local RunService     = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService   = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService    = game:GetService("HttpService")
+local CoreGui        = game:GetService("CoreGui")
+
+local plr            = Players.LocalPlayer
+local char           = plr.Character or plr.CharacterAdded:Wait()
+local hrp            = char:WaitForChild("HumanoidRootPart")
+local hum            = char:WaitForChild("Humanoid")
+
+-- CommF_ is Blox Fruits' primary RemoteFunction for nearly every server action
+local CommF_         = ReplicatedStorage:WaitForChild("Remotes", 10)
+                       and ReplicatedStorage.Remotes:WaitForChild("CommF_", 10)
+
+-- ============================================================
+--  GLOBAL STATE (_G flags — executor persists these)
+-- ============================================================
+_G.BH_AutoFarm        = false
+_G.BH_AutoMastery     = false
+_G.BH_AutoBones       = false
+_G.BH_AutoHalloween   = false
+_G.BH_AutoRaid        = false
+_G.BH_AutoBoss        = false
+_G.BH_KillAura        = false
+_G.BH_FastAttack      = false
+_G.BH_FruitESP        = false
+_G.BH_AutoStats       = false
+_G.BH_Fly             = false
+_G.BH_RemoteSpy       = false
+_G.BH_AntiFAFK        = true
+_G.BH_FlySpeed        = 60
+_G.BH_AuraRange       = 40
+_G.BH_TargetSea       = 1          -- 1 / 2 / 3
+_G.BH_StatPriority    = "Melee"    -- "Melee" | "Defense" | "Sword" | "Gun" | "Blox"
+
+-- ============================================================
+--  REMOTE SPY MODULE
+-- ============================================================
+local RemoteSpy = {}
+RemoteSpy.Log   = {}   -- { time, remote, type, args }
+RemoteSpy.Max   = 500  -- max entries before rolling
+
+local function hookRemotes()
+    -- Patch RemoteFunction:InvokeServer and RemoteEvent:FireServer via __namecall
+    local mt = getrawmetatable and getrawmetatable(game)
+    if not mt then return end   -- executor doesn't expose metatable → spy disabled silently
+
+    local old_namecall = mt.__namecall
+    setreadonly(mt, false)
+    mt.__namecall = function(self, ...)
+        local method = getnamecallmethod()
+        local args   = {...}
+        if (method == "FireServer" or method == "InvokeServer") and
+           (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+            -- Log entry
+            local entry = {
+                time   = os.clock(),
+                name   = self.Name,
+                path   = self:GetFullName(),
+                type   = method,
+                args   = args,
+            }
+            table.insert(RemoteSpy.Log, 1, entry)
+            if #RemoteSpy.Log > RemoteSpy.Max then
+                table.remove(RemoteSpy.Log)
+            end
+            -- Push to spy tab label if GUI exists and spy is ON
+            if _G.BH_RemoteSpy and _G.BH_SpyCallback then
+                pcall(_G.BH_SpyCallback, entry)
+            end
+        end
+        return old_namecall(self, ...)
+    end
+    setreadonly(mt, true)
+end
+
+pcall(hookRemotes)   -- silently fails on executors without metatable access
+
+-- ============================================================
+--  GUI BUILDER
+-- ============================================================
+-- Destroy old instance on re-inject
+if CoreGui:FindFirstChild("BloxHub") then
+    CoreGui:FindFirstChild("BloxHub"):Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "BloxHub"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent         = CoreGui
+
+-- ── Colour palette ──────────────────────────────────────────
+local C = {
+    bg         = Color3.fromRGB(12,  8,  22),    -- deep black-purple
+    panel      = Color3.fromRGB(22, 14, 42),
+    accent     = Color3.fromRGB(138, 43, 226),   -- blueviolet
+    accent2    = Color3.fromRGB(180, 90, 255),
+    text       = Color3.fromRGB(220, 200, 255),
+    textDim    = Color3.fromRGB(130, 110, 170),
+    green      = Color3.fromRGB(80,  220, 120),
+    red        = Color3.fromRGB(220,  70,  70),
+    border     = Color3.fromRGB(90,  40, 160),
+    spy        = Color3.fromRGB(255, 180,  60),
+}
+
+-- ── Tween helpers ───────────────────────────────────────────
+local function tween(obj, props, t, style, dir)
+    TweenService:Create(obj,
+        TweenInfo.new(t or 0.25, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out),
+        props
+    ):Play()
+end
+
+-- ── Main frame ──────────────────────────────────────────────
+local Main = Instance.new("Frame")
+Main.Name            = "Main"
+Main.Size            = UDim2.new(0, 580, 0, 420)
+Main.Position        = UDim2.new(0.5, -290, 0.5, -210)
+Main.BackgroundColor3 = C.bg
+Main.BorderSizePixel  = 0
+Main.ClipDescendants  = true
+Main.Parent           = ScreenGui
+
+-- Rounded corners
+local corner = Instance.new("UICorner", Main)
+corner.CornerRadius = UDim.new(0, 12)
+
+-- Animated gradient border
+local border = Instance.new("Frame", Main)
+border.Size              = UDim2.new(1, 4, 1, 4)
+border.Position          = UDim2.new(0, -2, 0, -2)
+border.BackgroundColor3  = C.accent
+border.ZIndex            = 0
+border.BorderSizePixel   = 0
+Instance.new("UICorner", border).CornerRadius = UDim.new(0, 14)
+-- Pulse the border
+spawn(function()
+    local up = true
+    while Main.Parent do
+        local target = up and C.accent2 or C.accent
+        tween(border, {BackgroundColor3 = target}, 1.5, Enum.EasingStyle.Sine)
+        wait(1.5)
+        up = not up
+    end
+end)
+
+-- ── Title bar ───────────────────────────────────────────────
+local TitleBar = Instance.new("Frame", Main)
+TitleBar.Name              = "TitleBar"
+TitleBar.Size              = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3  = C.panel
+TitleBar.BorderSizePixel   = 0
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+
+local TitleLabel = Instance.new("TextLabel", TitleBar)
+TitleLabel.Size              = UDim2.new(1, -100, 1, 0)
+TitleLabel.Position          = UDim2.new(0, 14, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text              = "🍈  BloxHub  |  Blox Fruits"
+TitleLabel.TextColor3        = C.accent2
+TitleLabel.Font              = Enum.Font.GothamBold
+TitleLabel.TextSize          = 15
+TitleLabel.TextXAlignment    = Enum.TextXAlignment.Left
+
+-- Close button
+local BtnClose = Instance.new("TextButton", TitleBar)
+BtnClose.Size              = UDim2.new(0, 28, 0, 22)
+BtnClose.Position          = UDim2.new(1, -32, 0.5, -11)
+BtnClose.BackgroundColor3  = C.red
+BtnClose.Text              = "✕"
+BtnClose.TextColor3        = Color3.new(1,1,1)
+BtnClose.Font              = Enum.Font.GothamBold
+BtnClose.TextSize          = 13
+BtnClose.BorderSizePixel   = 0
+Instance.new("UICorner", BtnClose).CornerRadius = UDim.new(0, 6)
+
+-- Minimize button
+local BtnMin = Instance.new("TextButton", TitleBar)
+BtnMin.Size              = UDim2.new(0, 28, 0, 22)
+BtnMin.Position          = UDim2.new(1, -64, 0.5, -11)
+BtnMin.BackgroundColor3  = C.accent
+BtnMin.Text              = "—"
+BtnMin.TextColor3        = Color3.new(1,1,1)
+BtnMin.Font              = Enum.Font.GothamBold
+BtnMin.TextSize          = 13
+BtnMin.BorderSizePixel   = 0
+Instance.new("UICorner", BtnMin).CornerRadius = UDim.new(0, 6)
+
+-- Open button (always visible when minimized)
+local BtnOpen = Instance.new("TextButton", ScreenGui)
+BtnOpen.Size              = UDim2.new(0, 110, 0, 30)
+BtnOpen.Position          = UDim2.new(0, 10, 0.5, -15)
+BtnOpen.BackgroundColor3  = C.accent
+BtnOpen.Text              = "🍈 BloxHub"
+BtnOpen.TextColor3        = Color3.new(1,1,1)
+BtnOpen.Font              = Enum.Font.GothamBold
+BtnOpen.TextSize          = 13
+BtnOpen.BorderSizePixel   = 0
+BtnOpen.Visible           = false
+Instance.new("UICorner", BtnOpen).CornerRadius = UDim.new(0, 8)
+
+-- ── Dragging ────────────────────────────────────────────────
+do
+    local dragging, dragStart, startPos
+    TitleBar.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging  = true
+            dragStart = inp.Position
+            startPos  = Main.Position
+        end
+    end)
+    TitleBar.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = inp.Position - dragStart
+            Main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- Close / Minimize / Open logic
+BtnClose.MouseButton1Click:Connect(function()
+    tween(Main, {Size = UDim2.new(0, 580, 0, 0)}, 0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+    wait(0.31)
+    Main.Visible = false
+    BtnOpen.Visible = true
+end)
+
+BtnMin.MouseButton1Click:Connect(function()
+    if Main.Size.Y.Offset > 36 then
+        tween(Main, {Size = UDim2.new(0, 580, 0, 36)}, 0.25, Enum.EasingStyle.Quad)
+    else
+        tween(Main, {Size = UDim2.new(0, 580, 0, 420)}, 0.3, Enum.EasingStyle.Back)
+    end
+end)
+
+BtnOpen.MouseButton1Click:Connect(function()
+    Main.Visible = true
+    Main.Size = UDim2.new(0, 580, 0, 0)
+    tween(Main, {Size = UDim2.new(0, 580, 0, 420)}, 0.35, Enum.EasingStyle.Back)
+    BtnOpen.Visible = false
+end)
+
+-- INSERT hotkey
+UserInputService.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    if inp.KeyCode == Enum.KeyCode.Insert then
+        Main.Visible = not Main.Visible
+        BtnOpen.Visible = not Main.Visible
+    end
+end)
+
+-- ── Tab system ──────────────────────────────────────────────
+local TabBar = Instance.new("Frame", Main)
+TabBar.Name              = "TabBar"
+TabBar.Size              = UDim2.new(0, 130, 1, -36)
+TabBar.Position          = UDim2.new(0, 0, 0, 36)
+TabBar.BackgroundColor3  = C.panel
+TabBar.BorderSizePixel   = 0
+
+local TabLayout = Instance.new("UIListLayout", TabBar)
+TabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabLayout.Padding   = UDim.new(0, 2)
+
+local ContentArea = Instance.new("Frame", Main)
+ContentArea.Name              = "Content"
+ContentArea.Size              = UDim2.new(1, -134, 1, -40)
+ContentArea.Position          = UDim2.new(0, 132, 0, 38)
+ContentArea.BackgroundColor3  = C.bg
+ContentArea.BorderSizePixel   = 0
+
+local activeTab, activePage
+
+local function makeTab(name, icon, order)
+    local btn = Instance.new("TextButton", TabBar)
+    btn.Name              = name
+    btn.LayoutOrder       = order
+    btn.Size              = UDim2.new(1, 0, 0, 38)
+    btn.BackgroundColor3  = C.bg
+    btn.Text              = icon .. "  " .. name
+    btn.TextColor3        = C.textDim
+    btn.Font              = Enum.Font.Gotham
+    btn.TextSize          = 12
+    btn.TextXAlignment    = Enum.TextXAlignment.Left
+    btn.BorderSizePixel   = 0
+
+    local pad = Instance.new("UIPadding", btn)
+    pad.PaddingLeft = UDim.new(0, 10)
+
+    local sel = Instance.new("Frame", btn)
+    sel.Name             = "Sel"
+    sel.Size             = UDim2.new(0, 3, 1, 0)
+    sel.Position         = UDim2.new(0, 0, 0, 0)
+    sel.BackgroundColor3 = C.accent
+    sel.BorderSizePixel  = 0
+    sel.Visible          = false
+
+    -- Page
+    local page = Instance.new("ScrollingFrame", ContentArea)
+    page.Name              = name
+    page.Size              = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel   = 0
+    page.ScrollBarThickness = 4
+    page.ScrollBarImageColor3 = C.accent
+    page.CanvasSize        = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible           = false
+
+    local listLayout = Instance.new("UIListLayout", page)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Padding   = UDim.new(0, 6)
+    local pagePad = Instance.new("UIPadding", page)
+    pagePad.PaddingTop    = UDim.new(0, 8)
+    pagePad.PaddingLeft   = UDim.new(0, 8)
+    pagePad.PaddingRight  = UDim.new(0, 8)
+
+    btn.MouseButton1Click:Connect(function()
+        if activeTab then
+            activeTab.TextColor3    = C.textDim
+            activeTab:FindFirstChild("Sel").Visible = false
+        end
+        if activePage then activePage.Visible = false end
+        activeTab, activePage = btn, page
+        btn.TextColor3 = C.accent2
+        sel.Visible    = true
+        page.Visible   = true
+    end)
+
+    return btn, page
+end
+
+-- ── Widget builders ─────────────────────────────────────────
+local function addSection(page, title)
+    local lbl = Instance.new("TextLabel", page)
+    lbl.Size              = UDim2.new(1, -6, 0, 20)
+    lbl.BackgroundTransparency = 1
+    lbl.Text              = "── " .. title .. " ──"
+    lbl.TextColor3        = C.accent
+    lbl.Font              = Enum.Font.GothamBold
+    lbl.TextSize          = 12
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+    return lbl
+end
+
+local function addToggle(page, label, flag, order)
+    local row = Instance.new("Frame", page)
+    row.LayoutOrder       = order or 0
+    row.Size              = UDim2.new(1, -6, 0, 32)
+    row.BackgroundColor3  = C.panel
+    row.BorderSizePixel   = 0
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size              = UDim2.new(1, -60, 1, 0)
+    lbl.Position          = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text              = label
+    lbl.TextColor3        = C.text
+    lbl.Font              = Enum.Font.Gotham
+    lbl.TextSize          = 13
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+
+    local pill = Instance.new("Frame", row)
+    pill.Size             = UDim2.new(0, 44, 0, 20)
+    pill.Position         = UDim2.new(1, -52, 0.5, -10)
+    pill.BackgroundColor3 = _G[flag] and C.green or C.red
+    pill.BorderSizePixel  = 0
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(0.5, 0)
+
+    local knob = Instance.new("Frame", pill)
+    knob.Size             = UDim2.new(0, 16, 0, 16)
+    knob.Position         = _G[flag] and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+    knob.BorderSizePixel  = 0
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0.5, 0)
+
+    local btn = Instance.new("TextButton", row)
+    btn.Size              = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text              = ""
+
+    btn.MouseButton1Click:Connect(function()
+        _G[flag] = not _G[flag]
+        tween(pill, {BackgroundColor3 = _G[flag] and C.green or C.red}, 0.2)
+        tween(knob, {Position = _G[flag] and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)}, 0.2)
+    end)
+
+    return row
+end
+
+local function addSlider(page, label, flagKey, min_, max_, step, order)
+    local row = Instance.new("Frame", page)
+    row.LayoutOrder      = order or 0
+    row.Size             = UDim2.new(1, -6, 0, 46)
+    row.BackgroundColor3 = C.panel
+    row.BorderSizePixel  = 0
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size             = UDim2.new(0.6, 0, 0, 20)
+    lbl.Position         = UDim2.new(0, 10, 0, 4)
+    lbl.BackgroundTransparency = 1
+    lbl.Text             = label
+    lbl.TextColor3       = C.text
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextSize         = 12
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+
+    local valLbl = Instance.new("TextLabel", row)
+    valLbl.Size          = UDim2.new(0.3, 0, 0, 20)
+    valLbl.Position      = UDim2.new(0.65, 0, 0, 4)
+    valLbl.BackgroundTransparency = 1
+    valLbl.Text          = tostring(_G[flagKey])
+    valLbl.TextColor3    = C.accent2
+    valLbl.Font          = Enum.Font.GothamBold
+    valLbl.TextSize      = 12
+    valLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+    local track = Instance.new("Frame", row)
+    track.Size           = UDim2.new(1, -20, 0, 6)
+    track.Position       = UDim2.new(0, 10, 1, -16)
+    track.BackgroundColor3 = C.bg
+    track.BorderSizePixel = 0
+    Instance.new("UICorner", track).CornerRadius = UDim.new(0.5, 0)
+
+    local fill = Instance.new("Frame", track)
+    fill.Size            = UDim2.new((_G[flagKey]-min_)/(max_-min_), 0, 1, 0)
+    fill.BackgroundColor3 = C.accent
+    fill.BorderSizePixel = 0
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0.5, 0)
+
+    local dragging = false
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    track.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local rel = math.clamp((i.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+            local raw = min_ + (max_ - min_) * rel
+            local snapped = math.floor(raw / step + 0.5) * step
+            _G[flagKey] = math.clamp(snapped, min_, max_)
+            fill.Size   = UDim2.new((_G[flagKey]-min_)/(max_-min_), 0, 1, 0)
+            valLbl.Text = tostring(_G[flagKey])
+        end
+    end)
+end
+
+local function addLabel(page, text, color)
+    local lbl = Instance.new("TextLabel", page)
+    lbl.Size             = UDim2.new(1, -6, 0, 22)
+    lbl.BackgroundTransparency = 1
+    lbl.Text             = text
+    lbl.TextColor3       = color or C.textDim
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextSize         = 11
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.TextWrapped      = true
+    return lbl
+end
+
+-- ============================================================
+--  BUILD TABS
+-- ============================================================
+local tabFarm,     pageFarm     = makeTab("Farm",      "⚔️",  1)
+local tabBones,    pageBones    = makeTab("Bones",     "🦴",  2)
+local tabHallow,   pageHallow   = makeTab("Halloween", "🎃",  3)
+local tabRaid,     pageRaid     = makeTab("Raid",      "🏴",  4)
+local tabBoss,     pageBoss     = makeTab("Boss",      "👹",  5)
+local tabESP,      pageESP      = makeTab("ESP",       "👁️",  6)
+local tabMisc,     pageMisc     = makeTab("Misc",      "⚙️",  7)
+local tabSpy,      pageSpy      = makeTab("RemoteSpy", "📡",  8)
+
+-- ── FARM TAB ────────────────────────────────────────────────
+addSection(pageFarm, "Auto Farm")
+addToggle(pageFarm,  "Auto Farm (Level)",    "BH_AutoFarm",     1)
+addToggle(pageFarm,  "Auto Mastery",         "BH_AutoMastery",  2)
+addLabel (pageFarm,  "Targets enemies matching your quest level automatically.", C.textDim)
+addSection(pageFarm, "Kill Aura")
+addToggle(pageFarm,  "Kill Aura",            "BH_KillAura",     3)
+addSlider(pageFarm,  "Aura Range",           "BH_AuraRange",    10, 100, 5, 4)
+addSection(pageFarm, "Attack")
+addToggle(pageFarm,  "Fast Attack",          "BH_FastAttack",   5)
+addLabel (pageFarm,  "Removes attack cooldown via tool speed manipulation.", C.textDim)
+
+-- ── BONES TAB ───────────────────────────────────────────────
+addSection(pageBones, "Auto Bones")
+addToggle(pageBones, "Auto Get Bones",        "BH_AutoBones",   1)
+addLabel (pageBones, "Farms Living Zombies, Reborn Skeletons, Demonic Souls, Possessed Mummies. Loops gravestone every ~8 min.", C.textDim)
+addSection(pageBones, "Info")
+addLabel (pageBones, "🦴 Drop sources: Reborn Skeleton (1-3), Living Zombie (2-4), Demonic Soul (3-5), Possessed Mummy (4-7).", C.spy)
+addLabel (pageBones, "🪦 Gravestone Try Your Luck: 20 Bones chance. Available at night. Auto-triggered every 8 min.", C.spy)
+addLabel (pageBones, "🏪 Death King shop: Random Surprise (50 Bones), Titles (250/500/2000).", C.spy)
+
+-- ── HALLOWEEN TAB ───────────────────────────────────────────
+addSection(pageHallow, "Halloween Event 2026")
+addToggle(pageHallow, "Auto Halloween Farm",   "BH_AutoHalloween", 1)
+addLabel (pageHallow, "Trick or Treat (Harvest Moon) runs at XX:00 each hour for 10 min. Auto knocks doors for Candy Corn.", C.textDim)
+addSection(pageHallow, "Bosses")
+addLabel (pageHallow, "👺 Hellfire Gas Rider — Lv 3000 boss. Pays 250 Candy Corn + Candy Concoction.", C.spy)
+addLabel (pageHallow, "🐺 Unbound Werewolf — Returns 400 Candy Corn + Candy Concoction.", C.spy)
+addSection(pageHallow, "Cursed Chests")
+addLabel (pageHallow, "Cursed Chests spawn every 4-6 min. Drop: Bones, Fragments, 2x EXP, Spooky Fruits.", C.spy)
+addSection(pageHallow, "Potions")
+addLabel (pageHallow, "🧪 Pumpkin Potion: 1x Rare Fish + 1x Bones.", C.spy)
+addLabel (pageHallow, "🧪 Poltergeist Potion + Soul Swap Potion (new 2026).", C.spy)
+addLabel (pageHallow, "🎰 Spooky Gacha: spend Candy Corn. Grand prize: Hellfire (Gas mutation).", C.spy)
+
+-- ── RAID TAB ────────────────────────────────────────────────
+addSection(pageRaid, "Auto Raid")
+addToggle(pageRaid,  "Auto Raid",             "BH_AutoRaid",    1)
+addLabel (pageRaid,  "Uses CommF_:InvokeServer to queue and complete raids automatically per sea.", C.textDim)
+
+-- ── BOSS TAB ────────────────────────────────────────────────
+addSection(pageBoss, "Auto Boss Farm")
+addToggle(pageBoss,  "Auto Boss",             "BH_AutoBoss",    1)
+addLabel (pageBoss,  "Teleports to boss spawn, attacks, loops on death. Adjust sea target below.", C.textDim)
+addSection(pageBoss, "Sea Target")
+addLabel (pageBoss,  "Edit _G.BH_TargetSea = 1/2/3 to target bosses per sea.", C.accent2)
+
+-- ── ESP TAB ─────────────────────────────────────────────────
+addSection(pageESP, "Fruit ESP")
+addToggle(pageESP,  "Fruit ESP / Notifier",   "BH_FruitESP",   1)
+addLabel (pageESP,  "Renders BillboardGui above fruits with name + distance. Pings chat when rare.", C.textDim)
+
+-- ── MISC TAB ────────────────────────────────────────────────
+addSection(pageMisc, "Movement")
+addToggle(pageMisc, "Fly",                    "BH_Fly",         1)
+addSlider(pageMisc, "Fly Speed",              "BH_FlySpeed",    10, 200, 10, 2)
+addSection(pageMisc, "Stats")
+addToggle(pageMisc, "Auto Allocate Stats",    "BH_AutoStats",   3)
+addLabel (pageMisc, "Priority: edit _G.BH_StatPriority = 'Melee'|'Defense'|'Sword'|'Gun'|'Blox'", C.textDim)
+addSection(pageMisc, "Quality of Life")
+addToggle(pageMisc, "Anti-AFK",               "BH_AntiFAFK",   4)
+
+-- ── REMOTE SPY TAB ──────────────────────────────────────────
+addSection(pageSpy, "Remote Spy")
+addToggle(pageSpy,  "Enable Remote Spy",      "BH_RemoteSpy",  1)
+addLabel (pageSpy,  "⚡ Hooks __namecall. Logs FireServer / InvokeServer calls live.", C.spy)
+addLabel (pageSpy,  "Max 500 entries — rolls oldest out. Scroll down.", C.textDim)
+
+-- Live spy list
+local SpyScroll = Instance.new("ScrollingFrame", pageSpy)
+SpyScroll.Size              = UDim2.new(1, -6, 0, 180)
+SpyScroll.BackgroundColor3  = Color3.fromRGB(8, 5, 18)
+SpyScroll.BorderSizePixel   = 0
+SpyScroll.ScrollBarThickness = 3
+SpyScroll.ScrollBarImageColor3 = C.spy
+SpyScroll.CanvasSize        = UDim2.new(0, 0, 0, 0)
+SpyScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Instance.new("UICorner", SpyScroll).CornerRadius = UDim.new(0, 6)
+
+local SpyLayout = Instance.new("UIListLayout", SpyScroll)
+SpyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local SpyEntryCount = 0
+
+_G.BH_SpyCallback = function(entry)
+    SpyEntryCount = SpyEntryCount + 1
+    local row = Instance.new("TextLabel", SpyScroll)
+    row.LayoutOrder      = -SpyEntryCount  -- newest on top
+    row.Size             = UDim2.new(1, -6, 0, 18)
+    row.BackgroundTransparency = 1
+    row.TextColor3       = entry.type == "InvokeServer" and C.spy or C.accent2
+    row.Font             = Enum.Font.Code
+    row.TextSize         = 10
+    row.TextXAlignment   = Enum.TextXAlignment.Left
+    row.TextWrapped      = false
+    row.ClipsDescendants = true
+
+    -- Format args safely
+    local argStr = ""
+    for i, v in ipairs(entry.args) do
+        local ok, s = pcall(tostring, v)
+        argStr = argStr .. (ok and s or "?")
+        if i < #entry.args then argStr = argStr .. ", " end
+    end
+    if #argStr > 60 then argStr = argStr:sub(1,60) .. "…" end
+
+    row.Text = string.format("[%.2f] %s:%s(%s)", entry.time, entry.name, entry.type, argStr)
+
+    -- Trim to 150 visible rows in the scroll
+    if SpyEntryCount > 150 then
+        local children = SpyScroll:GetChildren()
+        for _, c in ipairs(children) do
+            if c:IsA("TextLabel") then c:Destroy(); break end
+        end
+    end
+end
+
+addLabel(pageSpy, "Common BF remotes:", C.accent2)
+addLabel(pageSpy, "CommF_:InvokeServer('StartQuest', id, npc)  — start quest", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('AbandonQuest')  — abandon quest", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('gravestoneEvent', 2)  — gravestone luck", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('gravestoneEvent', 2, true)  — claim bones", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('GetFruits')  — fruit notifier", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('InfoLeviathan','1')  — sea event spy", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('BuyBlackLeg')  — buy fighting style", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('RaceV4Progress','TeleportBack')", C.textDim)
+addLabel(pageSpy, "CommF_:InvokeServer('EliteHunter')  — elite hunter", C.textDim)
+addLabel(pageSpy, "ReportActivity:FireServer('GachaWindow')  — gacha event", C.textDim)
+
+-- Open Farm tab by default
+tabFarm:MouseButton1Click:wait()
+
+-- ============================================================
+--  OPEN ANIMATION (startup)
+-- ============================================================
+Main.Size = UDim2.new(0, 0, 0, 0)
+tween(Main, {Size = UDim2.new(0, 580, 0, 420)}, 0.45, Enum.EasingStyle.Back)
+
+-- Kick Farm tab active on start
+spawn(function()
+    wait(0.1)
+    tabFarm:MouseButton1Click:Fire()
+end)
+
+-- ============================================================
+--  LOGIC LOOPS
+-- ============================================================
+
+-- ── Helpers ─────────────────────────────────────────────────
+local function getChar()
+    char = plr.Character
+    if char then
+        hrp = char:FindFirstChild("HumanoidRootPart")
+        hum = char:FindFirstChild("Humanoid")
+    end
+    return char and hrp and hum
+end
+
+local function invokeCommF(...)
+    if not CommF_ then return nil end
+    local ok, res = pcall(function(...) return CommF_:InvokeServer(...) end, ...)
+    if ok then return res end
+    return nil
+end
+
+local function getEnemies()
+    local enemies = {}
+    local folder = workspace:FindFirstChild("Enemies")
+    if not folder then return enemies end
+    for _, v in ipairs(folder:GetChildren()) do
+        local h = v:FindFirstChildOfClass("Humanoid")
+        local r = v:FindFirstChild("HumanoidRootPart")
+        if h and r and h.Health > 0 then
+            table.insert(enemies, v)
+        end
+    end
+    return enemies
+end
+
+local function getClosestEnemy(range)
+    if not getChar() then return nil end
+    local closest, dist = nil, range or math.huge
+    for _, v in ipairs(getEnemies()) do
+        local r = v:FindFirstChild("HumanoidRootPart")
+        if r then
+            local d = (hrp.Position - r.Position).Magnitude
+            if d < dist then closest, dist = v, d end
+        end
+    end
+    return closest
+end
+
+local function tpTo(cf)
+    if not getChar() then return end
+    hrp.CFrame = cf
+end
+
+local function attackNearest()
+    local enemy = getClosestEnemy(60)
+    if enemy then
+        local tool = plr.Character:FindFirstChildOfClass("Tool")
+        if tool then
+            local handle = tool:FindFirstChild("Handle")
+            if handle then
+                -- Simulate tool activation via RemoteEvent
+                local remote = tool:FindFirstChildOfClass("RemoteEvent")
+                    or tool:FindFirstChildOfClass("RemoteFunction")
+                if remote then pcall(function() remote:FireServer() end) end
+            end
+        end
+        -- Move near enemy
+        if enemy:FindFirstChild("HumanoidRootPart") then
+            tpTo(enemy.HumanoidRootPart.CFrame * CFrame.new(0,0,5))
+        end
+    end
+end
+
+-- ── Quest data (Sea 1 sample — extend for Sea 2/3) ──────────
+-- Format: { NPC name, Quest table key, Quest level requirement }
+local QUEST_DATA = {
+    [1] = { -- Sea 1
+        {30,  "Monkey",           {"StartQuest", "Monkey",          "Monkey Pirate Leader"}},
+        {60,  "BanditsS1",        {"StartQuest", "Bandit",          "Bandit King"}},
+        {90,  "Pirates",          {"StartQuest", "Pirates",         "Pirate King"}},
+        {120, "Kung-Fu Dugong",   {"StartQuest", "KungFuDugong",    "Dugong Chief"}},
+        {175, "Desert Bandits",   {"StartQuest", "DesertBandit",    "Desert Officer"}},
+        {300, "Sky Bandits",      {"StartQuest", "SkyBandit",       "Sky Executioner"}},
+        {450, "Prison Bandits",   {"StartQuest", "PrisonBandit",    "Chief Warden"}},
+        {625, "Magma Ninjas",     {"StartQuest", "MagmaNinja",      "Magma Admiral"}},
+        {700, "Ice Soldiers",     {"StartQuest", "IceSoldier",      "Ice Admiral"}},
+    },
+    [2] = { -- Sea 2
+        {700,  "Forest Pirates",  {"StartQuest", "ForestPirate",   "Forest Pirate Leader"}},
+        {850,  "Laboratory",      {"StartQuest", "RipIndra",       "Scientist"}},
+        {1000, "Zombie Island",   {"StartQuest", "LivingZombie",   "Zombie Island Boss"}},
+        {1150, "Peanut City",     {"StartQuest", "PeanutScout",    "Peanut President"}},
+        {1275, "Ice Castle",      {"StartQuest", "IceCastleKnight","Ice Admiral V2"}},
+    },
+    [3] = { -- Sea 3
+        {1500, "Haunted Castle",  {"StartQuest", "HauntedCrew",    "Cursed Captain"}},
+        {1575, "Sea of Treats",   {"StartQuest", "CandyCrew",      "Sweet Lord"}},
+        {1700, "Forest of Oars",  {"StartQuest", "PineappleCrew",  "Pineapple Baron"}},
+        {1875, "Mansion",         {"StartQuest", "MansionThug",    "Butler"}},
+        {1975, "Floating Turtle", {"StartQuest", "TurtleCrew",     "Chief Turtle"}},
+        {2075, "God's Church",    {"StartQuest", "ChurchUser",     "Priest"}},
+        {2200, "Cursed Ship",     {"StartQuest", "CursedCrew",     "Soul Reaper"}},
+        {2300, "Ice Dimension",   {"StartQuest", "IceDimensionKnight","Dimensional Ruler"}},
+    },
+}
+
+local function getBestQuest()
+    local level = plr:FindFirstChild("leaderstats")
+              and plr.leaderstats:FindFirstChild("Level")
+              and plr.leaderstats.Level.Value or 1
+    local sea = _G.BH_TargetSea
+    local best = nil
+    for _, entry in ipairs(QUEST_DATA[sea] or {}) do
+        if level >= entry[1] then best = entry end
+    end
+    return best
+end
+
+-- ── Auto Farm loop ───────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(0.1)
+        if _G.BH_AutoFarm and getChar() then
+            local questInfo = getBestQuest()
+            if questInfo then
+                -- Accept quest if not active
+                local questGui = plr.PlayerGui:FindFirstChild("Main")
+                local questActive = questGui and questGui:FindFirstChild("Quest")
+                             and questGui.Quest.Visible
+                if not questActive then
+                    invokeCommF(unpack(questInfo[3]))
+                    wait(0.5)
+                end
+                -- Attack nearest enemy
+                attackNearest()
+            end
+        end
+    end
+end)
+
+-- ── Auto Mastery loop ────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(0.1)
+        if _G.BH_AutoMastery and getChar() then
+            attackNearest()
+        end
+    end
+end)
+
+-- ── Kill Aura loop ───────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(0.05)
+        if _G.BH_KillAura and getChar() then
+            for _, enemy in ipairs(getEnemies()) do
+                local r = enemy:FindFirstChild("HumanoidRootPart")
+                if r and (hrp.Position - r.Position).Magnitude <= _G.BH_AuraRange then
+                    -- Equip + fire current weapon/skill
+                    local tool = char:FindFirstChildOfClass("Tool")
+                    if tool then
+                        local re = tool:FindFirstChildOfClass("RemoteEvent")
+                        if re then pcall(function() re:FireServer() end) end
+                    end
+                    tpTo(r.CFrame * CFrame.new(0,0,4))
+                    break
+                end
+            end
+        end
+    end
+end)
+
+-- ── Fast Attack ──────────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(0.5)
+        if _G.BH_FastAttack and getChar() then
+            for _, tool in ipairs(char:GetChildren()) do
+                if tool:IsA("Tool") then
+                    tool.ManualActivationOnly = false
+                    -- Suppress cooldown by rapid re-equip
+                    local hum2 = char:FindFirstChildOfClass("Humanoid")
+                    if hum2 then
+                        hum2:EquipTool(tool)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ── Auto Bones loop ──────────────────────────────────────────
+local BONE_ENEMIES = {"Living Zombie","Reborn Skeleton","Demonic Soul","Possessed Mummy","Haunted Crew Member","Ghost Shark"}
+local GRAVESTONE_CF  = CFrame.new(-10371.4717, 330.764496, -10131.4199)  -- Sea 2 gravestone (Second Sea hill)
+local lastGravestone = 0
+
+spawn(function()
+    while true do
+        wait(0.1)
+        if _G.BH_AutoBones and getChar() then
+            -- Try gravestone every ~8 min
+            if os.time() - lastGravestone > 480 then
+                tpTo(GRAVESTONE_CF)
+                wait(1)
+                local res = invokeCommF("gravestoneEvent", 2)
+                if res and not string.find(tostring(res),"Error") and not string.find(tostring(res),"Nothing") then
+                    invokeCommF("gravestoneEvent", 2, true)
+                    lastGravestone = os.time()
+                else
+                    lastGravestone = os.time()  -- reset timer even on fail
+                end
+                wait(0.5)
+            end
+            -- Farm bone-dropping enemies
+            local folder = workspace:FindFirstChild("Enemies")
+            if folder then
+                for _, v in ipairs(folder:GetChildren()) do
+                    local h = v:FindFirstChildOfClass("Humanoid")
+                    local r = v:FindFirstChild("HumanoidRootPart")
+                    if h and r and h.Health > 0 then
+                        for _, boneName in ipairs(BONE_ENEMIES) do
+                            if v.Name == boneName then
+                                tpTo(r.CFrame * CFrame.new(0,0,5))
+                                attackNearest()
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ── Auto Halloween Event loop ────────────────────────────────
+-- Candy Corn sources: Trick or Treat doors (Harvest Moon XX:00–XX:10), Cursed Chests, Bosses
+local lastChestCheck  = 0
+local lastTrickTreat  = 0
+
+local function findCursedChests()
+    local chests = {}
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v.Name == "CursedChest" and v:IsA("Model") then
+            table.insert(chests, v)
+        end
+    end
+    return chests
+end
+
+spawn(function()
+    while true do
+        wait(0.5)
+        if _G.BH_AutoHalloween and getChar() then
+            -- Farm Cursed Chests every 30s check
+            if os.time() - lastChestCheck > 30 then
+                lastChestCheck = os.time()
+                local chests = findCursedChests()
+                for _, chest in ipairs(chests) do
+                    local r = chest:FindFirstChild("HitBox") or chest:FindFirstChildOfClass("Part")
+                    if r then
+                        tpTo(CFrame.new(r.Position))
+                        wait(0.3)
+                    end
+                end
+            end
+
+            -- Trick or Treat: attempt every 2 min (server gate: only works XX:00–XX:10)
+            if os.time() - lastTrickTreat > 120 then
+                lastTrickTreat = os.time()
+                -- Walk to Trick or Treat doors (dynamic — use proximity)
+                for _, v in ipairs(workspace:GetDescendants()) do
+                    if (v.Name == "TrickOrTreatDoor" or v.Name:find("HalloweenDoor"))
+                       and v:IsA("Part") then
+                        tpTo(CFrame.new(v.Position) * CFrame.new(0,0,-3))
+                        wait(0.3)
+                        -- Trigger via proximity prompt if present
+                        local pp = v:FindFirstChildOfClass("ProximityPrompt")
+                            or v.Parent:FindFirstChildOfClass("ProximityPrompt")
+                        if pp then
+                            fireproximityprompt(pp)  -- executor global
+                        end
+                        wait(0.2)
+                    end
+                end
+            end
+
+            -- Bone enemies (dual-purpose during event)
+            local folder = workspace:FindFirstChild("Enemies")
+            if folder then
+                for _, v in ipairs(folder:GetChildren()) do
+                    local h = v:FindFirstChildOfClass("Humanoid")
+                    local r = v:FindFirstChild("HumanoidRootPart")
+                    if h and r and h.Health > 0 then
+                        if v.Name == "Bone Wraith" or v.Name == "Evil Wraith"
+                           or v.Name == "Haunted Crew Member" then
+                            tpTo(r.CFrame * CFrame.new(0,0,5))
+                            attackNearest()
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ── Auto Raid loop ───────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(1)
+        if _G.BH_AutoRaid and getChar() then
+            -- Queue raid via CommF_
+            pcall(function()
+                invokeCommF("IslandRaidStatus")
+                wait(0.5)
+                invokeCommF("StartRaid", _G.BH_TargetSea)
+                wait(0.5)
+            end)
+            attackNearest()
+        end
+    end
+end)
+
+-- ── Auto Boss loop ───────────────────────────────────────────
+-- Boss spawn positions (Sea 1 sample; extend for 2/3)
+local BOSS_SPAWNS = {
+    [1] = {
+        CFrame.new(-1301, 20, 1180),   -- Gorilla King
+        CFrame.new(951, 65, 2027),     -- Vice Admiral
+        CFrame.new(-2498, 65, -270),   -- Warden
+        CFrame.new(-2050, 20, -2800),  -- Swan
+    },
+    [2] = {
+        CFrame.new(-15155, 136, -374), -- Darkbeard
+        CFrame.new(926, 213, -11552),  -- Order
+    },
+    [3] = {
+        CFrame.new(-28255, 460, 1250), -- Calamity
+    },
+}
+
+spawn(function()
+    local idx = 1
+    while true do
+        wait(0.5)
+        if _G.BH_AutoBoss and getChar() then
+            local spawns = BOSS_SPAWNS[_G.BH_TargetSea] or BOSS_SPAWNS[1]
+            local cf = spawns[idx]
+            if cf then
+                tpTo(cf)
+                wait(0.5)
+                attackNearest()
+                wait(2)
+                idx = (idx % #spawns) + 1
+            end
+        end
+    end
+end)
+
+-- ── Fruit ESP ────────────────────────────────────────────────
+local espBillboards = {}
+
+local RARE_FRUITS = {
+    "Dragon","Leopard","Dough","Shadow","Blizzard","Venom","Soul",
+    "Control","Spirit","Buddha","Phoenix","Rumble","String","Gravity",
+    "Magma","Dark","Light","Revive","Ghost","Tiger","Hellfire"
+}
+
+local function isRare(name)
+    for _, r in ipairs(RARE_FRUITS) do
+        if name:find(r) then return true end
+    end
+    return false
+end
+
+spawn(function()
+    while true do
+        wait(1)
+        -- Clear stale
+        for fruit, bb in pairs(espBillboards) do
+            if not fruit.Parent then
+                bb:Destroy()
+                espBillboards[fruit] = nil
+            end
+        end
+        if _G.BH_FruitESP and getChar() then
+            local folder = workspace:FindFirstChild("Fruits")
+                        or workspace:FindFirstChild("GameItems")
+            if folder then
+                for _, fruit in ipairs(folder:GetDescendants()) do
+                    if fruit:IsA("BasePart") and not espBillboards[fruit] then
+                        local bb = Instance.new("BillboardGui", fruit)
+                        bb.AlwaysOnTop = true
+                        bb.Size        = UDim2.new(0, 100, 0, 30)
+                        bb.StudsOffset = Vector3.new(0, 3, 0)
+                        local lbl = Instance.new("TextLabel", bb)
+                        lbl.Size              = UDim2.new(1,0,1,0)
+                        lbl.BackgroundTransparency = 1
+                        lbl.Text              = "🍈 " .. fruit.Parent.Name
+                        lbl.TextColor3        = isRare(fruit.Parent.Name) and C.spy or C.accent2
+                        lbl.Font              = Enum.Font.GothamBold
+                        lbl.TextSize          = 12
+                        espBillboards[fruit]  = bb
+
+                        if isRare(fruit.Parent.Name) then
+                            game:GetService("StarterGui"):SetCore("ChatMakeSystemMessage", {
+                                Text      = "[BloxHub] 🍈 RARE FRUIT: " .. fruit.Parent.Name,
+                                Color     = C.spy,
+                                Font      = Enum.Font.GothamBold,
+                                TextSize  = 14,
+                            })
+                        end
+                    end
+                    -- Update distance label
+                    if espBillboards[fruit] and getChar() then
+                        local lbl2 = espBillboards[fruit]:FindFirstChildOfClass("TextLabel")
+                        if lbl2 then
+                            local d = math.floor((hrp.Position - fruit.Position).Magnitude)
+                            lbl2.Text = "🍈 " .. fruit.Parent.Name .. "  [" .. d .. "m]"
+                        end
+                    end
+                end
+            end
+        else
+            -- Clear all billboards when off
+            for fruit, bb in pairs(espBillboards) do
+                bb:Destroy()
+                espBillboards[fruit] = nil
+            end
+        end
+    end
+end)
+
+-- ── Fly ──────────────────────────────────────────────────────
+spawn(function()
+    local flyBV, flyAng
+    local function cleanFly()
+        if flyBV  then flyBV:Destroy()  end
+        if flyAng then flyAng:Destroy() end
+    end
+    while true do
+        wait(0.05)
+        if _G.BH_Fly and getChar() then
+            if not hrp:FindFirstChild("BH_FlyBV") then
+                flyBV       = Instance.new("BodyVelocity", hrp)
+                flyBV.Name  = "BH_FlyBV"
+                flyBV.MaxForce = Vector3.new(1e9,1e9,1e9)
+                flyAng      = Instance.new("BodyAngularVelocity", hrp)
+                flyAng.Name = "BH_FlyAV"
+                flyAng.MaxTorque    = Vector3.new(1e9,1e9,1e9)
+                flyAng.AngularVelocity = Vector3.new(0,0,0)
+            end
+            local cam    = workspace.CurrentCamera
+            local spd    = _G.BH_FlySpeed
+            local dir    = Vector3.new(0,0,0)
+            local uis    = UserInputService
+            if uis:IsKeyDown(Enum.KeyCode.W) then dir = dir + cam.CFrame.LookVector end
+            if uis:IsKeyDown(Enum.KeyCode.S) then dir = dir - cam.CFrame.LookVector end
+            if uis:IsKeyDown(Enum.KeyCode.A) then dir = dir - cam.CFrame.RightVector end
+            if uis:IsKeyDown(Enum.KeyCode.D) then dir = dir + cam.CFrame.RightVector end
+            if uis:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+            if uis:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0,1,0) end
+            hrp.BH_FlyBV.Velocity = dir.Magnitude > 0 and dir.Unit * spd or Vector3.new(0,0,0)
+        else
+            if hrp and hrp:FindFirstChild("BH_FlyBV") then
+                cleanFly()
+                hrp.BH_FlyBV:Destroy()
+            end
+        end
+    end
+end)
+
+-- ── Auto Stats ───────────────────────────────────────────────
+local STAT_MAP = {
+    Melee   = "Strength",
+    Defense = "Defense",
+    Sword   = "Sword",
+    Gun     = "Gun",
+    Blox    = "BloxFruit",
+}
+spawn(function()
+    while true do
+        wait(5)
+        if _G.BH_AutoStats and getChar() then
+            local stat = STAT_MAP[_G.BH_StatPriority] or "Strength"
+            invokeCommF("AddStat", stat)
+        end
+    end
+end)
+
+-- ── Anti-AFK ─────────────────────────────────────────────────
+spawn(function()
+    while true do
+        wait(60)
+        if _G.BH_AntiFAFK and getChar() then
+            -- Move hrp slightly to reset idle timer
+            local origin = hrp.CFrame
+            hrp.CFrame = origin * CFrame.new(0,0.1,0)
+            wait(0.1)
+            hrp.CFrame = origin
+        end
+    end
+end)
+
+-- ── Character respawn refresh ────────────────────────────────
+plr.CharacterAdded:Connect(function(c)
+    char = c
+    hrp  = c:WaitForChild("HumanoidRootPart")
+    hum  = c:WaitForChild("Humanoid")
+end)
+
+-- ============================================================
+--  STATUS LABEL (bottom bar)
+-- ============================================================
+local StatusBar = Instance.new("Frame", Main)
+StatusBar.Size             = UDim2.new(1, 0, 0, 18)
+StatusBar.Position         = UDim2.new(0, 0, 1, -18)
+StatusBar.BackgroundColor3 = C.panel
+StatusBar.BorderSizePixel  = 0
+
+local StatusLabel = Instance.new("TextLabel", StatusBar)
+StatusLabel.Size             = UDim2.new(1, -10, 1, 0)
+StatusLabel.Position         = UDim2.new(0, 8, 0, 0)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Font             = Enum.Font.Code
+StatusLabel.TextSize         = 10
+StatusLabel.TextColor3       = C.textDim
+StatusLabel.TextXAlignment   = Enum.TextXAlignment.Left
+
+spawn(function()
+    while Main.Parent do
+        wait(0.5)
+        local parts = {}
+        if _G.BH_AutoFarm    then table.insert(parts, "⚔ Farm") end
+        if _G.BH_AutoBones   then table.insert(parts, "🦴 Bones") end
+        if _G.BH_AutoHalloween then table.insert(parts, "🎃 Hallow") end
+        if _G.BH_AutoRaid    then table.insert(parts, "🏴 Raid") end
+        if _G.BH_AutoBoss    then table.insert(parts, "👹 Boss") end
+        if _G.BH_KillAura    then table.insert(parts, "💫 Aura") end
+        if _G.BH_FruitESP    then table.insert(parts, "👁 ESP") end
+        if _G.BH_Fly         then table.insert(parts, "🕊 Fly") end
+        if _G.BH_RemoteSpy   then table.insert(parts, "📡 Spy") end
+        StatusLabel.Text = #parts > 0
+            and ("ACTIVE: " .. table.concat(parts, "  •  "))
+            or  "BloxHub ready — toggle features above"
+    end
+end)
+
+print("[BloxHub] Loaded. INSERT = toggle GUI.")
